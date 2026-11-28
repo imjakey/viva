@@ -362,6 +362,22 @@ func (builder *Builder) appendImage(image gfx.Image) {
 	if RoundPixel(image.Bounds.Width) <= 0 || RoundPixel(image.Bounds.Height) <= 0 {
 		return
 	}
+	if image.Texture != nil {
+		// A shared texture has no pixels in Go to cut: the renderer scissors
+		// the whole texture to the clip instead. A platform without shared
+		// textures drops it rather than paint a picture it cannot read.
+		if !platform.NativeTextures {
+			return
+		}
+		if image.HasClip {
+			if _, ok := intersectVisible(image.Bounds, image.ClipOf); !ok {
+				return
+			}
+		}
+		builder.clippedImages = append(builder.clippedImages, image)
+		builder.clippedImageBefores = append(builder.clippedImageBefores, uint32(len(builder.order)))
+		return
+	}
 	if image.Backdrop {
 		// A backdrop is beneath every layer, before any shape: it carries no
 		// place among them.
@@ -730,6 +746,10 @@ func (builder *Builder) syncLabels() {
 // frame's labels, after shapesBefore shapes.
 func (builder *Builder) appendImageLabel(index int, shapesBefore uint32) {
 	image := builder.clippedImages[index]
+	if image.Texture != nil {
+		builder.appendTextureLabel(image, index, shapesBefore)
+		return
+	}
 	bitmap := image.Bitmap
 	left := max(int(image.Source.X), 0)
 	top := max(int(image.Source.Y), 0)
@@ -767,6 +787,32 @@ func (builder *Builder) appendImageLabel(index int, shapesBefore uint32) {
 		ImageRadius: image.Radius, ImageFade: image.Fade,
 		BitmapUpload: builder.bitmapUpload(image, index),
 	})
+	builder.labelImage = append(builder.labelImage, int32(index))
+}
+
+// appendTextureLabel adds a shared-texture image to the frame's labels, after
+// shapesBefore shapes. It carries no pixels: the renderer opens the texture,
+// and scissors it to image.ClipOf when the clip cuts it.
+func (builder *Builder) appendTextureLabel(image gfx.Image, index int, shapesBefore uint32) {
+	texture := image.Texture
+	width := RoundPixel(image.Bounds.Width)
+	height := RoundPixel(image.Bounds.Height)
+	if width <= 0 || height <= 0 {
+		return
+	}
+	entry := platform.TextLabel{
+		X: float32(RoundPosition(image.Bounds.X)), Y: float32(RoundPosition(image.Bounds.Y)),
+		Width: float32(width), Height: float32(height),
+		Layer:         builder.PlatformLayer(image.Layer),
+		ShapesBefore:  shapesBefore,
+		TextureHandle: texture.Handle, TextureID: texture.ID,
+		TextureWidth: texture.Width, TextureHeight: texture.Height, TextureVersion: texture.Version,
+		ImageRadius: image.Radius, ImageFade: image.Fade,
+	}
+	if image.HasClip {
+		entry.Clip, entry.Clipped = image.ClipOf, true
+	}
+	builder.labels = append(builder.labels, entry)
 	builder.labelImage = append(builder.labelImage, int32(index))
 }
 
@@ -1167,6 +1213,9 @@ func sameImages(left, right []gfx.Image) bool {
 	}
 	for index := range left {
 		a, b := left[index], right[index]
+		if !sameTexture(a.Texture, b.Texture) {
+			return false
+		}
 		if a.Bounds != b.Bounds || a.Source != b.Source || a.Layer != b.Layer || a.Order != b.Order || a.Backdrop != b.Backdrop || a.Radius != b.Radius || a.Fade != b.Fade || a.Bitmap.Width != b.Bitmap.Width ||
 			a.Bitmap.Height != b.Bitmap.Height || a.Bitmap.Stride != b.Bitmap.Stride || a.Bitmap.ID != b.Bitmap.ID ||
 			a.Bitmap.Version != b.Bitmap.Version || len(a.Bitmap.Pix) != len(b.Bitmap.Pix) {
@@ -1183,12 +1232,26 @@ func sameImages(left, right []gfx.Image) bool {
 // identity and version, source region and storage. A bitmap with no identity
 // (ID 0) is never the same: nothing says its pixels did not change.
 func SameImageBitmap(a, b gfx.Image) bool {
+	if a.Texture != nil || b.Texture != nil {
+		// A shared texture never reaches here as bytes: it is the same
+		// picture only when both draws name the same texture and version.
+		return sameTexture(a.Texture, b.Texture)
+	}
 	if a.Source != b.Source || a.Bitmap.Width != b.Bitmap.Width || a.Bitmap.Height != b.Bitmap.Height ||
 		a.Bitmap.Stride != b.Bitmap.Stride || a.Bitmap.ID != b.Bitmap.ID || a.Bitmap.Version != b.Bitmap.Version ||
 		len(a.Bitmap.Pix) != len(b.Bitmap.Pix) || a.Bitmap.ID == 0 {
 		return false
 	}
 	return len(a.Bitmap.Pix) == 0 || &a.Bitmap.Pix[0] == &b.Bitmap.Pix[0]
+}
+
+// sameTexture reports whether two draws name the same shared texture, with the
+// same handle, size and version. Two nil textures are the same picture.
+func sameTexture(a, b *gfx.NativeTexture) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // saveContent remembers this frame's texts for the next comparison. Their runs

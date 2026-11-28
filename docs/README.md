@@ -41,6 +41,8 @@ mentions every exported method and theme field.
   file drops, and the rest of the native surface.
 - [audio.md](audio.md) — PCM output on the three native targets, what it does
   not do, and its measured cost.
+- [video.md](video.md) — playing video as pictures: the Media Foundation
+  engine and its shared textures, Go-decoded GIF and APNG, and the player API.
 - [web-deployment.md](web-deployment.md) — the browser build, its capability
   matrix, lifecycle mapping, static-hosting headers and security limits.
 - [diagnostics.md](diagnostics.md) — the structured event stream, its slog

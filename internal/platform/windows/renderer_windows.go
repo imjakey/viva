@@ -130,6 +130,7 @@ type renderer struct {
 	drawScratch drawScratch // what draw hands Direct3D by address
 	compositionState
 	window, device, context, swap, target                        uintptr
+	device1                                                      uintptr // ID3D11Device1, for opening shared textures
 	rectangleVertex, rectangleFragment, textVertex, textFragment uintptr
 	buffer, view, constants, blend, textBlend, raster, sampler   uintptr
 	direct                                                       *directRasterizer
@@ -160,6 +161,11 @@ type renderer struct {
 	// noLabelBatch makes a frame rasterize each changed label on its own, as
 	// before the batch path existed. Tests compare the two pixel by pixel.
 	noLabelBatch bool
+	// shared are the media engine textures opened on this device, by texture
+	// ID, and acquired are the ones this frame holds, released at its end.
+	shared      map[uint64]*sharedTexture
+	acquired    []*sharedTexture
+	frameNumber uint64
 }
 
 var textureIID = guid{0x6f15aaf2, 0xd208, 0x4e89, [8]byte{0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c}}
@@ -341,7 +347,17 @@ func (renderer *renderer) createResources() error {
 		return err
 	}
 	sampler := samplerDesc{Filter: 0x15, AddressU: 3, AddressV: 3, AddressW: 3, MaxLOD: math.MaxFloat32}
-	return hresult(comCall2(renderer.device, 23, uintptr(unsafe.Pointer(&sampler)), uintptr(unsafe.Pointer(&renderer.sampler))))
+	if err := hresult(comCall2(renderer.device, 23, uintptr(unsafe.Pointer(&sampler)), uintptr(unsafe.Pointer(&renderer.sampler)))); err != nil {
+		return err
+	}
+	// The 11.1 interface opens textures a media engine shares by handle; a
+	// device without it draws every frame except video.
+	var device1 uintptr
+	if hresult(comCall2(renderer.device, 0, uintptr(unsafe.Pointer(&iidDevice1)), uintptr(unsafe.Pointer(&device1)))) == nil {
+		renderer.device1 = device1
+	}
+	renderer.publishAdapterLUID()
+	return nil
 }
 
 // storeRectangles copies the changed instances and their layer and clip, then
@@ -612,6 +628,11 @@ func swapChainResize(bufferWidth, bufferHeight, width, height int, hasTarget, he
 // compositing batch onto it. The window's present and the offscreen render
 // share it, so a screenshot is made of the pixels the window would show.
 func (renderer *renderer) draw(width, height int, scale float32) error {
+	renderer.frameNumber++
+	defer func() {
+		renderer.releaseShared()
+		renderer.sweepShared(false)
+	}()
 	// A page that appeared has many labels to draw; draw their pixels in one
 	// Direct2D session before any of them is composited.
 	if err := renderer.prepareLabels(scale, width); err != nil {
@@ -678,6 +699,10 @@ func (renderer *renderer) draw(width, height int, scale float32) error {
 			for labelOffset := batch.First; labelOffset < batch.First+batch.Count; labelOffset++ {
 				index := renderer.labelOrder[labelOffset]
 				label := &renderer.labels[index]
+				if label.label.TextureID != 0 {
+					renderer.drawSharedTexture(label, scale, width, height, frame, &current)
+					continue
+				}
 				if label.label.Width <= 0 || label.label.Height <= 0 || label.label.Value == "" && len(label.label.Bitmap) == 0 {
 					// Nothing to draw: a texture kept from the text it had is not needed.
 					label.dropTexture()
@@ -789,6 +814,9 @@ func (renderer *renderer) close() {
 // keeps in memory, the instances, the labels and their batches, is left, so a
 // device made again can draw the same scene.
 func (renderer *renderer) releaseDevice() {
+	renderer.releaseShared()
+	renderer.sweepShared(true)
+	release(&renderer.device1)
 	if renderer.context != 0 {
 		comCall0(renderer.context, 110)
 		comCall0(renderer.context, 111)

@@ -14,6 +14,7 @@
 #endif
 #include <dlfcn.h>
 #import <CoreText/CoreText.h>
+#import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
@@ -90,6 +91,18 @@ typedef struct {
     uint64_t _bitmapID;
     uint32_t _bitmapVersion;
     float _imageRadius;
+    // A shared-texture label draws a picture a media engine decoded into an
+    // IOSurface: _sharedID names the engine's ring slot, _sharedHandle the
+    // surface to wrap, _sharedSurface retains it for this layer's lifetime,
+    // and _builtHandle is the surface _texture was made from.
+    BOOL _shared;
+    uint64_t _sharedID;
+    uint64_t _sharedHandle;
+    IOSurfaceRef _sharedSurface;
+    uint32_t _sharedVersion;
+    uint32_t _sharedWidth;
+    uint32_t _sharedHeight;
+    uint64_t _builtHandle;
     id<MTLTexture> _texture;
     NSMutableArray<id<MTLTexture>> *_additionalTextures;
     // A text label wider than a texture holds is rasterized in part: its textures hold the
@@ -113,6 +126,7 @@ typedef struct {
 - (void)updateFrame:(CGRect)frame;
 - (void)updateClipFromConfig:(viva_text_label)config;
 - (void)updateQuadFromConfig:(viva_text_label)config;
+- (void)updateSharedFromConfig:(viva_text_label)config;
 - (const float *)quad;
 - (const float *)tint;
 - (float)imageRadius;

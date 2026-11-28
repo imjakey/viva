@@ -694,7 +694,8 @@ func makeNativeTextLabels(labels []TextLabel) (unsafe.Pointer, []unsafe.Pointer,
 	validCount := 0
 	for index, label := range labels {
 		bitmap := len(label.Bitmap) > 0
-		if label.Width <= 0 || label.Height <= 0 || !bitmap && label.FontSize <= 0 {
+		texture := label.TextureID != 0
+		if label.Width <= 0 || label.Height <= 0 || !bitmap && !texture && label.FontSize <= 0 {
 			continue
 		}
 		content, runBytes := nativeLabelText(label.Value, label.Runs)
@@ -760,6 +761,12 @@ func makeNativeTextLabels(labels []TextLabel) (unsafe.Pointer, []unsafe.Pointer,
 			}
 			flags |= C.VIVA_LABEL_BITMAP
 		}
+		if texture {
+			if label.TextureHandle == 0 || label.TextureWidth <= 0 || label.TextureHeight <= 0 {
+				return fail(fmt.Errorf("darwin: texture label %d has invalid dimensions", index))
+			}
+			flags |= C.VIVA_LABEL_TEXTURE
+		}
 		native[validCount] = C.viva_text_label{
 			utf8:            (*C.uchar)(value),
 			utf8_length:     C.size_t(len(content)),
@@ -798,6 +805,11 @@ func makeNativeTextLabels(labels []TextLabel) (unsafe.Pointer, []unsafe.Pointer,
 			origin_y:        C.float(label.OriginY),
 			font_generation: C.uint32_t(label.FontGeneration),
 			shapes_before:   C.uint32_t(label.ShapesBefore),
+			texture_handle:  C.uint64_t(label.TextureHandle),
+			texture_id:      C.uint64_t(label.TextureID),
+			texture_version: C.uint32_t(label.TextureVersion),
+			texture_width:   C.uint32_t(max(label.TextureWidth, 0)),
+			texture_height:  C.uint32_t(max(label.TextureHeight, 0)),
 		}
 		if label.HasQuad {
 			// The corners and their colours decide where the label's picture

@@ -149,6 +149,9 @@ enum {
     // The label may only paint inside clip_x/clip_y/clip_width/clip_height.
     VIVA_LABEL_CLIPPED = 8,
     VIVA_LABEL_ITALIC = 16,
+    // The label draws a GPU texture a media engine decoded into, addressed by
+    // texture_handle, rather than pixels or text.
+    VIVA_LABEL_TEXTURE = 32,
 };
 
 typedef struct {
@@ -213,6 +216,16 @@ typedef struct {
     // label (platform.TextLabel.ShapesBefore): the composite plan interleaves
     // text and shapes at that index.
     uint32_t shapes_before;
+    // A shared-texture label (VIVA_LABEL_TEXTURE) draws the texture a media
+    // engine decoded into: texture_handle is its IOSurface, texture_id names
+    // the engine's ring slot, and texture_version counts the contents'
+    // changes. texture_width and texture_height are its size in pixels; the
+    // label's own width and height are the size it is drawn at.
+    uint64_t texture_handle;
+    uint64_t texture_id;
+    uint32_t texture_version;
+    uint32_t texture_width;
+    uint32_t texture_height;
 } viva_text_label;
 
 // viva_clip is the region, in logical pixels, that one rectangle or triangle

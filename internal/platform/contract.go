@@ -509,6 +509,17 @@ type TextLabel struct {
 	// BitmapUpload is true only when Bitmap content must cross a native
 	// boundary. A false bitmap label references the matching retained texture.
 	BitmapUpload bool
+	// TextureHandle, while TextureID is nonzero, is a GPU texture of a
+	// platform engine the renderer draws in place of a bitmap: an NT shared
+	// handle on Windows, an IOSurface on macOS. TextureWidth and
+	// TextureHeight are its size in pixels, and TextureVersion counts how
+	// often its contents changed. A texture label carries no Bitmap and no
+	// font metrics.
+	TextureHandle  uintptr
+	TextureID      uint64
+	TextureWidth   int
+	TextureHeight  int
+	TextureVersion uint32
 	// Quad, while HasQuad, is the shape the label paints instead of the
 	// axis-aligned X, Y, Width, Height rectangle: four corners (top-left,
 	// top-right, bottom-left, bottom-right) in logical pixels, and the straight

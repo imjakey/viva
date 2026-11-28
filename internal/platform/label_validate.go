@@ -15,8 +15,16 @@ func ValidateTextLabel(index int, label TextLabel) error {
 			return fmt.Errorf("platform: text label %d has a non-finite metric", index)
 		}
 	}
-	if label.Width < 0 || label.Height < 0 || len(label.Bitmap) == 0 && !ValidFontSize(label.FontSize) {
+	image := len(label.Bitmap) > 0 || label.TextureID != 0
+	if label.Width < 0 || label.Height < 0 || !image && !ValidFontSize(label.FontSize) {
 		return fmt.Errorf("platform: text label %d has invalid bounds or font size", index)
+	}
+	if label.TextureID != 0 {
+		if label.Width <= 0 || label.Height <= 0 || label.TextureHandle == 0 ||
+			label.TextureWidth <= 0 || label.TextureHeight <= 0 {
+			return fmt.Errorf("platform: texture label %d has invalid dimensions", index)
+		}
+		return nil
 	}
 	if len(label.Runs) > 0 && label.CellWidth <= 0 {
 		return fmt.Errorf("platform: text label %d has invalid cell width", index)

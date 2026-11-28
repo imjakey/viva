@@ -317,10 +317,30 @@ type Bitmap struct {
 	Version       uint32
 }
 
-// Image is one bitmap draw. Source is measured in bitmap pixels. ClipOf and
-// HasClip capture the active clip intersection at paint time.
+// NativeTexture is a texture a platform engine decoded a picture into, shared
+// with the renderer: an NT handle on Windows, an IOSurface on macOS. ID is
+// stable while the texture lives, Handle is how the platform's renderer opens
+// it, and Version says how often its contents changed, so a renderer can tell
+// a new frame from a repeat. The engine keeps the texture alive while it shows
+// it; a canvas records only the fields it was given.
+type NativeTexture struct {
+	ID      uint64
+	Handle  uintptr
+	Width   int
+	Height  int
+	Version uint32
+}
+
+// Image is one bitmap or shared-texture draw. Source is measured in bitmap
+// pixels. ClipOf and HasClip capture the active clip intersection at paint
+// time. When Texture is set the whole texture is the image: Bitmap and Source
+// are ignored.
 type Image struct {
-	Bitmap  Bitmap
+	Bitmap Bitmap
+	// Texture, when set, is a GPU texture from a platform engine. The Windows
+	// and macOS renderers draw it; a frame built for another platform drops
+	// the image.
+	Texture *NativeTexture
 	Source  Rect
 	Bounds  Rect
 	Layer   uint16
@@ -1256,6 +1276,28 @@ func (canvas *Canvas) DrawBitmapShaded(bitmap Bitmap, source, bounds Rect, radiu
 		Fade:   min(max(fade, 0), 1),
 		Layer:  canvas.currentLayer(),
 		Order:  canvas.nextOrder(),
+	}
+	image.ClipOf, image.HasClip = canvas.clipSnapshot()
+	canvas.images = append(canvas.images, image)
+}
+
+// DrawTexture appends a shared texture sampled into bounds, faded by fade
+// (1-opacity), with square corners. The texture is drawn where the engine
+// decoded it, without a copy through memory. A nil texture, one with no
+// identity or no handle, one with a non-positive size, and bounds with no
+// area are ignored. The canvas records a copy of the texture's fields, so the
+// caller may reuse its value and later changes to it are not seen.
+func (canvas *Canvas) DrawTexture(texture *NativeTexture, bounds Rect, fade float32) {
+	if texture == nil || texture.ID == 0 || texture.Handle == 0 || texture.Width <= 0 || texture.Height <= 0 || bounds.Width <= 0 || bounds.Height <= 0 {
+		return
+	}
+	recorded := *texture
+	image := Image{
+		Texture: &recorded,
+		Bounds:  bounds,
+		Fade:    min(max(fade, 0), 1),
+		Layer:   canvas.currentLayer(),
+		Order:   canvas.nextOrder(),
 	}
 	image.ClipOf, image.HasClip = canvas.clipSnapshot()
 	canvas.images = append(canvas.images, image)

@@ -321,10 +321,11 @@ float viva_quantized_origin(float value) {
 uint64_t viva_label_content_hash(viva_text_label config) {
     uint64_t hash = 14695981039346656037ULL;
     hash = viva_hash_bytes(hash, config.utf8, config.utf8_length);
-    // Bitmap textures retain their source dimensions. Resizing their draw quad
-    // must find the same texture when Go omits an unchanged pixel payload.
-    BOOL bitmap = (config.flags & VIVA_LABEL_BITMAP) != 0;
-    float values[] = {bitmap ? 0 : config.width, bitmap ? 0 : config.height, config.font_size, config.font_weight,
+    // Bitmap and shared-texture layers retain their source dimensions. Resizing
+    // their draw quad must find the same texture when Go omits an unchanged
+    // pixel payload.
+    BOOL image = (config.flags & (VIVA_LABEL_BITMAP | VIVA_LABEL_TEXTURE)) != 0;
+    float values[] = {image ? 0 : config.width, image ? 0 : config.height, config.font_size, config.font_weight,
                       config.red, config.green, config.blue, config.alpha, config.cell_width,
                       viva_quantized_origin(config.origin_x), viva_quantized_origin(config.origin_y), config.baseline};
     hash = viva_hash_bytes(hash, values, sizeof(values));
@@ -346,6 +347,15 @@ uint64_t viva_label_content_hash(viva_text_label config) {
     if (config.bitmap != NULL && config.bitmap_id == 0) {
         hash = viva_hash_bytes(hash, config.bitmap, config.bitmap_length);
     }
+    // The slot's surface may change every frame as the engine's ring turns;
+    // the slot id and size identify the picture the label shows, and the
+    // layer wraps whatever surface comes in the same slot.
+    uint64_t textureIdentity[] = {
+        config.texture_id,
+        config.texture_width,
+        config.texture_height,
+    };
+    hash = viva_hash_bytes(hash, textureIdentity, sizeof(textureIdentity));
     return hash;
 }
 
@@ -536,11 +546,33 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
             _bitmapID = config.bitmap_id;
             _bitmapVersion = config.bitmap_version;
         }
+        if ((config.flags & VIVA_LABEL_TEXTURE) != 0) {
+            // A texture label without a surface has nothing to draw: fail the
+            // update rather than keep a layer that renders blank.
+            if (config.texture_handle == 0 || config.texture_width == 0 || config.texture_height == 0) {
+                [self release];
+                return nil;
+            }
+            _shared = YES;
+            _sharedID = config.texture_id;
+            _sharedHandle = config.texture_handle;
+            _sharedSurface = (IOSurfaceRef)(uintptr_t)config.texture_handle;
+            if (_sharedSurface != NULL) {
+                CFRetain(_sharedSurface);
+            }
+            _sharedVersion = config.texture_version;
+            _sharedWidth = config.texture_width;
+            _sharedHeight = config.texture_height;
+        }
     }
     return self;
 }
 
 - (void)dealloc {
+    if (_sharedSurface != NULL) {
+        CFRelease(_sharedSurface);
+        _sharedSurface = NULL;
+    }
     [_texture release];
     [_additionalTextures release];
     [_value release];
@@ -558,7 +590,7 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
     if (![self contentMatchesSizeAgnostic:config]) {
         return NO;
     }
-    if (_bitmap != nil) {
+    if (_bitmap != nil || _shared) {
         return YES;
     }
     return _frame.size.width == config.width && _frame.size.height == config.height;
@@ -585,6 +617,14 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
         _monoFace != config.mono_face || _cellWidth != config.cell_width || _baseline != config.baseline ||
         _runCount != (config.runs == NULL ? 0 : config.run_count) ||
         (_runCount > 0 && memcmp(_runs, config.runs, _runCount * sizeof(viva_text_run)) != 0)) {
+        return NO;
+    }
+    BOOL shared = (config.flags & VIVA_LABEL_TEXTURE) != 0;
+    if (_shared != shared) {
+        return NO;
+    }
+    if (shared && (_sharedID != config.texture_id ||
+                   _sharedWidth != config.texture_width || _sharedHeight != config.texture_height)) {
         return NO;
     }
     BOOL bitmap = (config.flags & VIVA_LABEL_BITMAP) != 0;
@@ -658,6 +698,28 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
     }
 }
 
+// updateSharedFromConfig takes the latest surface of a shared-texture label:
+// the engine's ring slot holds a new pixel buffer, which rebuildWithDevice
+// wraps as a texture when the frame draws. Retain the IOSurface so device
+// rebuilds or pipelined rendering stay safe if the player closes concurrently.
+- (void)updateSharedFromConfig:(viva_text_label)config {
+    if (!_shared) {
+        return;
+    }
+    if (config.texture_handle != _sharedHandle) {
+        IOSurfaceRef next = (IOSurfaceRef)(uintptr_t)config.texture_handle;
+        if (next != NULL) {
+            CFRetain(next);
+        }
+        if (_sharedSurface != NULL) {
+            CFRelease(_sharedSurface);
+        }
+        _sharedSurface = next;
+        _sharedHandle = config.texture_handle;
+    }
+    _sharedVersion = config.texture_version;
+}
+
 - (const float *)quad {
     return _quad;
 }
@@ -695,6 +757,9 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
 // can be seen in viewport is no longer all in its texture: it moved, or its clip or the
 // viewport did. Any other label is left as it is.
 - (BOOL)refreshWindowWithDevice:(id<MTLDevice>)device scale:(CGFloat)scale viewport:(CGSize)viewport {
+    if (_shared) {
+        return [self rebuildWithDevice:device scale:scale viewport:viewport];
+    }
     CGFloat widthScale = [self rasterWidthScale:scale];
     if (_texture == nil || _lastScale != scale ||
         viva_bitmap_extent_stale((size_t)ceil(_frame.size.width * _windowPixelScale), (size_t)ceil(_frame.size.width * widthScale))) {
@@ -731,6 +796,38 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
 }
 
 - (BOOL)rebuildWithDevice:(id<MTLDevice>)device scale:(CGFloat)scale viewport:(CGSize)viewport {
+    if (_shared) {
+        // The surface follows the engine's ring: a slot may show a new pixel
+        // buffer each frame, which becomes this layer's texture. The contents
+        // of a surface already wrapped change in place and need no rebuild.
+        if (_texture != nil && _builtHandle == _sharedHandle &&
+            _textureWidth == _sharedWidth && _textureHeight == _sharedHeight) {
+            return YES;
+        }
+        IOSurfaceRef surface = _sharedSurface;
+        if (surface == NULL) {
+            return NO;
+        }
+        MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:_sharedWidth
+                                        height:_sharedHeight
+                                     mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor iosurface:surface plane:0];
+        if (texture == nil) {
+            return NO;
+        }
+        [_texture release];
+        _texture = texture;
+        _textureWidth = _sharedWidth;
+        _textureHeight = _sharedHeight;
+        _builtHandle = _sharedHandle;
+        _windowed = NO;
+        _lastScale = scale;
+        return YES;
+    }
     size_t wantWidth = 0, wantHeight = 0;
     if (_bitmap != nil) {
         viva_bitmap_texture_extent(_frame, scale, _bitmapWidth, _bitmapHeight, &wantWidth, &wantHeight);
@@ -1106,7 +1203,7 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
 }
 
 - (CGRect)quadAtIndex:(NSUInteger)index {
-    if (_bitmap != nil) {
+    if (_bitmap != nil || _shared) {
         return _frame;
     }
     size_t full = (size_t)MAX(1.0, ceil(_frame.size.width * _windowPixelScale));
@@ -1118,7 +1215,7 @@ void viva_label_window(size_t full, size_t limit, BOOL visible, size_t left, siz
 }
 
 - (CGRect)textureFrameAtIndex:(NSUInteger)index {
-    if (_bitmap != nil) return _frame;
+    if (_bitmap != nil || _shared) return _frame;
     size_t full = (size_t)MAX(1.0, ceil(_frame.size.width * _windowPixelScale));
     size_t tileLeft = _windowLeft + index * VIVA_LABEL_TILE_WIDTH;
     size_t tileRight = tileLeft + MIN(_windowRight - tileLeft, VIVA_LABEL_TILE_WIDTH);
@@ -1180,9 +1277,10 @@ int viva_update_label_layers(
                 labels[index].width, labels[index].height)];
             [existing updateClipFromConfig:labels[index]];
             [existing updateQuadFromConfig:labels[index]];
+            [existing updateSharedFromConfig:labels[index]];
             // An image drawn at a new size may need a texture of another resolution, and a
             // line held in part another part of it.
-            BOOL rebuilt = (labels[index].flags & VIVA_LABEL_BITMAP) != 0
+            BOOL rebuilt = (labels[index].flags & (VIVA_LABEL_BITMAP | VIVA_LABEL_TEXTURE)) != 0
                 ? [existing rebuildWithDevice:device scale:scale viewport:viewport]
                 : [existing refreshWindowWithDevice:device scale:scale viewport:viewport];
             if (!rebuilt) {
@@ -1441,7 +1539,7 @@ int viva_make_scene_resources(
     if (config.shader_library != NULL && config.shader_library_length > 0) {
         viva_remember_shader_library(config.shader_library, config.shader_library_length);
         _Static_assert(sizeof(viva_rectangle) == 80, "rectangle ABI must be 80 bytes");
-        _Static_assert(sizeof(viva_text_label) == 272, "text label ABI must be 272 bytes");
+        _Static_assert(sizeof(viva_text_label) == 304, "text label ABI must be 304 bytes");
         _Static_assert(sizeof(viva_text_run) == 36, "text run ABI must be 36 bytes");
         _Static_assert(sizeof(viva_composite_command) == 36, "composite command ABI must be 36 bytes");
         dispatch_data_t libraryData = dispatch_data_create(

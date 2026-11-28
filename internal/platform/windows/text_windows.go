@@ -59,6 +59,9 @@ type labelTexture struct {
 	// spans are the columns of an lcd grid label's texture that are text of one color;
 	// empty for a label that is all in label.Color.
 	spans []colorSpan
+	// lastSharedID remembers the last shared media texture this label drew so
+	// a transient keyed-mutex timeout keeps showing it instead of flickering.
+	lastSharedID uint64
 }
 type bitmapInfoHeader struct {
 	Size               uint32
@@ -321,6 +324,9 @@ func (label *labelTexture) update(next platform.TextLabel) {
 	if labelContentChanged(label.label, next) {
 		label.stale = true
 	}
+	if next.TextureID == 0 {
+		label.lastSharedID = 0
+	}
 	// The runs belong to the caller's frame; keep a copy for the next comparison.
 	label.runs = append(label.runs[:0], next.Runs...)
 	label.label = next
@@ -328,6 +334,11 @@ func (label *labelTexture) update(next platform.TextLabel) {
 }
 
 func labelContentChanged(previous, next platform.TextLabel) bool {
+	if previous.TextureID != next.TextureID || previous.TextureHandle != next.TextureHandle ||
+		previous.TextureWidth != next.TextureWidth || previous.TextureHeight != next.TextureHeight ||
+		previous.TextureVersion != next.TextureVersion {
+		return true
+	}
 	isBitmap := len(previous.Bitmap) > 0 || len(next.Bitmap) > 0
 	return previous.Value != next.Value || (!isBitmap && previous.Height != next.Height) || previous.FontSize != next.FontSize || previous.Weight != next.Weight || previous.Italic != next.Italic || previous.Color != next.Color || previous.FontGeneration != next.FontGeneration ||
 		previous.Mono != next.Mono || previous.MonoFace != next.MonoFace || previous.CellWidth != next.CellWidth || !sameRuns(previous.Runs, next.Runs) ||
